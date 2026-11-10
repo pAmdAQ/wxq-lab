@@ -9,46 +9,58 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch all lineup pages (UI body, pageSize=12)
+      - name: Fetch all lineup pages (raw body, fallback UI body)
         run: |
           python - <<'PY'
           import json, pathlib, time, urllib.request, datetime
           base = "https://api.datatft.com/wzwxq/lineups/search"
           out = pathlib.Path("data/raw/full-lineups")
           out.mkdir(parents=True, exist_ok=True)
-          all_rows, seen, total = [], set(), None
-          for page in range(1, 5):
-              body = json.dumps({
-                  "groupingMode": "rosterSimilarity", "version": "v261106a",
-                  "gameType": 2, "time": 7, "minimumCount": 50,
-                  "sortBy": "appearanceRate", "page": page, "pageSize": 12,
-              }).encode()
-              req = urllib.request.Request(base, data=body, method="POST", headers={
+
+          def post(body):
+              req = urllib.request.Request(base, data=json.dumps(body).encode(), method="POST", headers={
                   "User-Agent": "wxq-local-research/1.0 (full lineups; GitHub Actions)",
                   "Content-Type": "application/json", "Accept": "application/json"})
-              obj = json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
-              print("page", page, "code", obj.get("code"), "msg", obj.get("message"))
-              assert obj.get("code") == 1 and obj.get("data"), obj
-              data = obj["data"]
-              total = data.get("total", total)
-              rows = data.get("lineups") or []
-              print("page", page, "rows", len(rows), "total", total)
-              (out / f"page_{page}.json").write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
-              new = 0
-              for r in rows:
+              return json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
+
+          modes = [
+              ("raw", lambda page: {"page": page, "pageSize": 12}),
+              ("ui", lambda page: {"groupingMode": "rosterSimilarity", "version": "v261106a",
+                                   "gameType": 2, "time": 7, "minimumCount": 50,
+                                   "sortBy": "appearanceRate", "page": page, "pageSize": 12}),
+          ]
+          chosen = None
+          for name, make in modes:
+              probe = post(make(1))
+              print("probe", name, "code", probe.get("code"), "total", (probe.get("data") or {}).get("total"))
+              if probe.get("code") == 1 and probe.get("data"):
+                  chosen = (name, make, probe)
+                  break
+          assert chosen, "no working body"
+          mode, make, first = chosen
+          all_rows, seen, total = [], set(), first["data"].get("total")
+          pages = [first]
+          for page in range(2, 5):
+              obj = post(make(page))
+              print("page", page, "code", obj.get("code"), "rows", len((obj.get("data") or {}).get("lineups") or []))
+              pages.append(obj)
+              if obj.get("code") != 1 or not obj.get("data"):
+                  break
+              total = obj["data"].get("total", total)
+              time.sleep(0.8)
+          for i, obj in enumerate(pages, 1):
+              (out / f"page_{i}.json").write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+              for r in (obj.get("data") or {}).get("lineups") or []:
                   k = str(r.get("lineupKey") or "")
                   if k and k not in seen:
-                      seen.add(k); all_rows.append(r); new += 1
-              if not rows or new == 0 or (total is not None and len(all_rows) >= int(total)):
-                  break
-              time.sleep(0.8)
-          merged = {"code": 1, "data": {"total": total, "pageSize": len(all_rows), "lineups": all_rows}}
+                      seen.add(k); all_rows.append(r)
+          merged = {"mode": mode, "code": 1, "data": {"total": total, "pageSize": len(all_rows), "lineups": all_rows}}
           (out / "merged.json").write_text(json.dumps(merged, ensure_ascii=False, indent=1), encoding="utf-8")
           (out / "meta.json").write_text(json.dumps({
               "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "total": total, "rows": len(all_rows),
+              "mode": mode, "total": total, "rows": len(all_rows),
           }, ensure_ascii=False, indent=1), encoding="utf-8")
-          print("MERGED", len(all_rows), "of", total)
+          print("MERGED", mode, len(all_rows), "of", total)
           assert total is not None and len(all_rows) == int(total), (total, len(all_rows))
           PY
       - uses: actions/upload-artifact@v4
