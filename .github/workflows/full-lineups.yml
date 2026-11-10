@@ -1,0 +1,40 @@
+name: full-lineups
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch all lineups (pageSize=50)
+        run: |
+          python - <<'PY'
+          import json, pathlib, urllib.request, datetime
+          url = "https://api.datatft.com/wzwxq/lineups/search"
+          body = json.dumps({"page": 1, "pageSize": 50, "time": 7, "version": "v1"}).encode()
+          req = urllib.request.Request(url, data=body, method="POST", headers={
+              "User-Agent": "wxq-local-research/1.0 (full lineups; GitHub Actions)",
+              "Content-Type": "application/json", "Accept": "application/json"})
+          obj = json.loads(urllib.request.urlopen(req, timeout=60).read().decode())
+          print("code", obj.get("code"), "total", (obj.get("data") or {}).get("total"))
+          assert obj.get("code") == 1 and obj.get("data"), obj
+          data = obj["data"]
+          rows = data.get("lineups") or []
+          print("rows", len(rows), "total", data.get("total"))
+          assert data.get("total") == len(rows), (data.get("total"), len(rows))
+          out = pathlib.Path("data/raw/full-lineups")
+          out.mkdir(parents=True, exist_ok=True)
+          (out / "lineups.json").write_text(json.dumps(obj, ensure_ascii=False, indent=1), encoding="utf-8")
+          (out / "meta.json").write_text(json.dumps({
+              "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "request_body": {"page": 1, "pageSize": 50, "time": 7, "version": "v1"},
+              "total": data.get("total"), "rows": len(rows), "sampleCount": data.get("sampleCount"),
+          }, ensure_ascii=False, indent=1), encoding="utf-8")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-lineups
+          path: data/raw/full-lineups
